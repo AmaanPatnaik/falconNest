@@ -16,6 +16,7 @@ const els = {
   sheetWidth: document.querySelector("#sheet-width"),
   sheetHeight: document.querySelector("#sheet-height"),
   spacing: document.querySelector("#spacing"),
+  rotationStep: document.querySelector("#rotation-step"),
   units: document.querySelector("#units"),
   copies: document.querySelector("#copies"),
   status: document.querySelector("#status"),
@@ -32,6 +33,16 @@ els.nestButton.addEventListener("click", nest);
 els.saveDxf.addEventListener("click", () => saveText("falconnest-layout.dxf", state.lastDxf, "application/dxf"));
 els.saveSvg.addEventListener("click", () => saveText("falconnest-layout.svg", state.lastSvg, "image/svg+xml"));
 els.clearButton.addEventListener("click", clearAll);
+for (const control of [els.sheetWidth, els.sheetHeight, els.spacing, els.rotationStep]) {
+  control.addEventListener("input", () => {
+    if (state.parts.length && state.placements.length) {
+      nest();
+    } else {
+      render();
+    }
+  });
+}
+els.units.addEventListener("change", render);
 
 render();
 
@@ -69,6 +80,7 @@ async function handleFiles(event) {
 function parseDxf(text, name) {
   const pairs = toPairs(text);
   const entities = [];
+  const unitsCode = parseDxfUnits(pairs);
   let inEntities = false;
 
   for (let i = 0; i < pairs.length; i += 1) {
@@ -104,12 +116,15 @@ function parseDxf(text, name) {
   const bounds = getBounds(entities);
   const normalized = entities.map((entity) => ({
     ...entity,
-    points: entity.points.map((point) => ({ x: point.x - bounds.minX, y: point.y - bounds.minY })),
+    points: entity.points.map((point) => ({ ...point, x: point.x - bounds.minX, y: point.y - bounds.minY })),
+    center: entity.center ? { x: entity.center.x - bounds.minX, y: entity.center.y - bounds.minY } : undefined,
   }));
 
   return {
     name,
+    unitsCode,
     entities: normalized,
+    originalBounds: bounds,
     bounds: {
       minX: 0,
       minY: 0,
@@ -119,6 +134,16 @@ function parseDxf(text, name) {
       height: bounds.height,
     },
   };
+}
+
+function parseDxfUnits(pairs) {
+  for (let i = 0; i < pairs.length - 1; i += 1) {
+    if (pairs[i].code === 9 && pairs[i].value === "$INSUNITS" && pairs[i + 1].code === 70) {
+      const code = Number(pairs[i + 1].value);
+      return Number.isFinite(code) ? code : 0;
+    }
+  }
+  return 0;
 }
 
 function toPairs(text) {
@@ -145,7 +170,7 @@ function parseLine(block) {
   const x2 = numberValue(block, 11);
   const y2 = numberValue(block, 21);
   if ([x1, y1, x2, y2].some((value) => value === null)) return null;
-  return { type: "polyline", closed: false, points: [{ x: x1, y: y1 }, { x: x2, y: y2 }] };
+  return { type: "line", closed: false, points: [{ x: x1, y: y1 }, { x: x2, y: y2 }] };
 }
 
 function parseLwPolyline(block) {
@@ -159,6 +184,8 @@ function parseLwPolyline(block) {
       points.push(current);
     } else if (pair.code === 20 && current) {
       current.y = Number(pair.value);
+    } else if (pair.code === 42 && current) {
+      current.bulge = Number(pair.value);
     }
   }
 
@@ -171,7 +198,7 @@ function parseCircle(block) {
   const cy = numberValue(block, 20);
   const r = numberValue(block, 40);
   if ([cx, cy, r].some((value) => value === null) || r <= 0) return [];
-  return [{ type: "polyline", closed: true, points: arcPoints(cx, cy, r, 0, 360, 48) }];
+  return [{ type: "circle", closed: true, center: { x: cx, y: cy }, radius: r, points: arcPoints(cx, cy, r, 0, 360, 96) }];
 }
 
 function parseArc(block) {
@@ -181,7 +208,15 @@ function parseArc(block) {
   const start = numberValue(block, 50);
   const end = numberValue(block, 51);
   if ([cx, cy, r, start, end].some((value) => value === null) || r <= 0) return [];
-  return [{ type: "polyline", closed: false, points: arcPoints(cx, cy, r, start, end, 32) }];
+  return [{
+    type: "arc",
+    closed: false,
+    center: { x: cx, y: cy },
+    radius: r,
+    startAngle: start,
+    endAngle: end,
+    points: arcPoints(cx, cy, r, start, end, 64),
+  }];
 }
 
 function arcPoints(cx, cy, r, startDeg, endDeg, segments) {
@@ -212,7 +247,8 @@ function nest() {
   const sheetWidth = positiveNumber(els.sheetWidth.value, 1200);
   const sheetHeight = positiveNumber(els.sheetHeight.value, 600);
   const spacing = Math.max(0, Number(els.spacing.value) || 0);
-  const sorted = [...state.parts].sort((a, b) => b.bounds.height - a.bounds.height || b.bounds.width - a.bounds.width);
+  const rotationStep = clamp(Math.floor(Number(els.rotationStep.value) || 15), 1, 360);
+  const sorted = [...state.parts].sort((a, b) => b.bounds.width * b.bounds.height - a.bounds.width * a.bounds.height);
   const placements = [];
   let sheet = 0;
   let x = spacing;
@@ -221,31 +257,34 @@ function nest() {
   let overflow = 0;
 
   for (const part of sorted) {
-    const width = part.bounds.width;
-    const height = part.bounds.height;
+    let rotated = bestRotationForSlot(part, sheetWidth - spacing * 2, sheetHeight - spacing * 2, rotationStep);
 
-    if (width + spacing * 2 > sheetWidth || height + spacing * 2 > sheetHeight) {
+    if (!rotated) {
       placements.push({ part, sheet: -1, x: 0, y: 0 });
       overflow += 1;
       continue;
     }
 
-    if (x + width + spacing > sheetWidth) {
+    rotated = bestRotationForSlot(part, sheetWidth - x - spacing, sheetHeight - y - spacing, rotationStep);
+
+    if (!rotated) {
       x = spacing;
       y += rowHeight + spacing;
       rowHeight = 0;
+      rotated = bestRotationForSlot(part, sheetWidth - x - spacing, sheetHeight - y - spacing, rotationStep);
     }
 
-    if (y + height + spacing > sheetHeight) {
+    if (!rotated) {
       sheet += 1;
       x = spacing;
       y = spacing;
       rowHeight = 0;
+      rotated = bestRotationForSlot(part, sheetWidth - x - spacing, sheetHeight - y - spacing, rotationStep);
     }
 
-    placements.push({ part, sheet, x, y });
-    x += width + spacing;
-    rowHeight = Math.max(rowHeight, height);
+    placements.push({ part, sheet, x, y, angle: rotated.angle, bounds: rotated.bounds });
+    x += rotated.bounds.width + spacing;
+    rowHeight = Math.max(rowHeight, rotated.bounds.height);
   }
 
   state.placements = placements;
@@ -256,8 +295,28 @@ function nest() {
 
   const placed = placements.length - overflow;
   const sheets = placements.reduce((max, item) => Math.max(max, item.sheet), -1) + 1;
-  setStatus(`Nested ${placed} part${placed === 1 ? "" : "s"} on ${sheets} sheet${sheets === 1 ? "" : "s"}.`, overflow > 0);
+  setStatus(`Nested ${placed} part${placed === 1 ? "" : "s"} on ${sheets} sheet${sheets === 1 ? "" : "s"} with ${rotationStep} degree rotation steps.`, overflow > 0);
   render();
+}
+
+function bestRotationForSlot(part, availableWidth, availableHeight, rotationStep) {
+  let best = null;
+  for (let angle = 0; angle < 360; angle += rotationStep) {
+    const bounds = getRotatedPartBounds(part, angle);
+    if (bounds.width <= availableWidth && bounds.height <= availableHeight) {
+      const waste = availableWidth * availableHeight - bounds.width * bounds.height;
+      const score = waste + bounds.height * 0.1;
+      if (!best || score < best.score) {
+        best = { angle, bounds, score };
+      }
+    }
+  }
+  return best;
+}
+
+function getRotatedPartBounds(part, angle) {
+  const points = part.entities.flatMap((entity) => entity.points.map((point) => rotatePoint(point, angle)));
+  return getBounds([{ points }]);
 }
 
 function buildSvg(placements, sheetWidth, sheetHeight) {
@@ -274,16 +333,20 @@ function buildSvg(placements, sheetWidth, sheetHeight) {
 
   for (const placement of visible) {
     const offsetY = placement.sheet * (sheetHeight + gap);
-    content.push(partToSvg(placement.part, placement.x, placement.y + offsetY, COLORS[placement.sheet % COLORS.length]));
+    const rotatedBounds = getRotatedPartBounds(placement.part, placement.angle || 0);
+    content.push(partToSvg(placement.part, placement.x, placement.y + offsetY, placement.angle || 0, rotatedBounds, COLORS[placement.sheet % COLORS.length]));
   }
 
   return `<svg xmlns="${SVG_NS}" viewBox="0 0 ${sheetWidth} ${Math.max(sheetHeight, totalHeight)}">${content.join("")}</svg>`;
 }
 
-function partToSvg(part, offsetX, offsetY, color) {
+function partToSvg(part, offsetX, offsetY, angle, rotatedBounds, color) {
   return part.entities
     .map((entity) => {
-      const points = entity.points.map((point) => `${round(point.x + offsetX)},${round(point.y + offsetY)}`);
+      const points = entity.points.map((point) => {
+        const rotated = rotatePoint(point, angle);
+        return `${formatNumber(rotated.x - rotatedBounds.minX + offsetX)},${formatNumber(rotated.y - rotatedBounds.minY + offsetY)}`;
+      });
       const close = entity.closed ? " Z" : "";
       return `<path d="M ${points.join(" L ")}${close}" fill="none" stroke="${color}" stroke-width="1"/>`;
     })
@@ -291,8 +354,9 @@ function partToSvg(part, offsetX, offsetY, color) {
 }
 
 function buildDxf(placements, sheetWidth, sheetHeight) {
-  const lines = ["0", "SECTION", "2", "HEADER", "9", "$ACADVER", "1", "AC1009", "0", "ENDSEC", "0", "SECTION", "2", "ENTITIES"];
   const visible = placements.filter((placement) => placement.sheet >= 0);
+  const unitsCode = firstUnitsCode(visible);
+  const lines = ["0", "SECTION", "2", "HEADER", "9", "$ACADVER", "1", "AC1009", "9", "$INSUNITS", "70", String(unitsCode), "0", "ENDSEC", "0", "SECTION", "2", "ENTITIES"];
   const gap = Math.max(sheetWidth, sheetHeight) * 0.06;
   const sheets = visible.reduce((max, item) => Math.max(max, item.sheet), -1) + 1;
 
@@ -306,16 +370,9 @@ function buildDxf(placements, sheetWidth, sheetHeight) {
 
   for (const placement of visible) {
     const offsetY = placement.sheet * (sheetHeight + gap);
+    const rotatedBounds = getRotatedPartBounds(placement.part, placement.angle || 0);
     for (const entity of placement.part.entities) {
-      const points = entity.points.map((point) => ({ x: point.x + placement.x, y: point.y + placement.y + offsetY }));
-      for (let i = 0; i < points.length - 1; i += 1) {
-        addLine(lines, points[i].x, points[i].y, points[i + 1].x, points[i + 1].y, "PARTS");
-      }
-      if (entity.closed && points.length > 2) {
-        const last = points[points.length - 1];
-        const first = points[0];
-        addLine(lines, last.x, last.y, first.x, first.y, "PARTS");
-      }
+      addDxfEntity(lines, entity, placement, offsetY, rotatedBounds);
     }
   }
 
@@ -324,7 +381,58 @@ function buildDxf(placements, sheetWidth, sheetHeight) {
 }
 
 function addLine(lines, x1, y1, x2, y2, layer) {
-  lines.push("0", "LINE", "8", layer, "10", String(round(x1)), "20", String(round(y1)), "11", String(round(x2)), "21", String(round(y2)));
+  lines.push("0", "LINE", "8", layer, "10", formatNumber(x1), "20", formatNumber(y1), "11", formatNumber(x2), "21", formatNumber(y2));
+}
+
+function addDxfEntity(lines, entity, placement, sheetOffsetY, rotatedBounds) {
+  const transform = (point) => transformPoint(point, placement, sheetOffsetY, rotatedBounds);
+  if (entity.type === "line") {
+    const start = transform(entity.points[0]);
+    const end = transform(entity.points[1]);
+    addLine(lines, start.x, start.y, end.x, end.y, "PARTS");
+    return;
+  }
+
+  if (entity.type === "circle" && entity.center && entity.radius) {
+    const center = transform(entity.center);
+    lines.push("0", "CIRCLE", "8", "PARTS", "10", formatNumber(center.x), "20", formatNumber(center.y), "40", formatNumber(entity.radius));
+    return;
+  }
+
+  if (entity.type === "arc" && entity.center && entity.radius) {
+    const center = transform(entity.center);
+    const angle = placement.angle || 0;
+    lines.push(
+      "0",
+      "ARC",
+      "8",
+      "PARTS",
+      "10",
+      formatNumber(center.x),
+      "20",
+      formatNumber(center.y),
+      "40",
+      formatNumber(entity.radius),
+      "50",
+      formatNumber(normalizeAngle((entity.startAngle || 0) + angle)),
+      "51",
+      formatNumber(normalizeAngle((entity.endAngle || 0) + angle))
+    );
+    return;
+  }
+
+  const points = entity.points.map((point) => ({ ...transform(point), bulge: point.bulge }));
+  addPolyline(lines, points, entity.closed, "PARTS");
+}
+
+function addPolyline(lines, points, closed, layer) {
+  lines.push("0", "LWPOLYLINE", "8", layer, "90", String(points.length), "70", closed ? "1" : "0");
+  for (const point of points) {
+    lines.push("10", formatNumber(point.x), "20", formatNumber(point.y));
+    if (point.bulge) {
+      lines.push("42", formatNumber(point.bulge));
+    }
+  }
 }
 
 function render() {
@@ -332,9 +440,13 @@ function render() {
 
   const sheetWidth = positiveNumber(els.sheetWidth.value, 1200);
   const sheetHeight = positiveNumber(els.sheetHeight.value, 600);
-  const svg = state.placements.length ? state.lastSvg : buildSvg([], sheetWidth, sheetHeight);
+  const svg = state.placements.length ? buildSvg(state.placements, sheetWidth, sheetHeight) : buildSvg([], sheetWidth, sheetHeight);
   els.stage.innerHTML = svg.replace(/^<svg[^>]*>|<\/svg>$/g, "");
-  els.stage.setAttribute("viewBox", getViewBox(svg, sheetWidth, sheetHeight));
+  const viewBox = getViewBox(svg, sheetWidth, sheetHeight);
+  const [, , width, height] = viewBox.split(/\s+/).map(Number);
+  els.stage.setAttribute("viewBox", viewBox);
+  els.stage.style.width = `${Math.max(width, 1)}px`;
+  els.stage.style.height = `${Math.max(height, 1)}px`;
 
   const totalArea = state.parts.reduce((sum, part) => sum + part.bounds.width * part.bounds.height, 0);
   els.summary.textContent = state.parts.length ? `${state.parts.length} parts, ${round(totalArea)} square ${els.units.value}` : "";
@@ -347,7 +459,7 @@ function renderParts() {
     const title = document.createElement("strong");
     const details = document.createElement("small");
     title.textContent = part.name;
-    details.textContent = `${round(part.bounds.width)} x ${round(part.bounds.height)} ${els.units.value}, ${part.entities.length} entities`;
+    details.textContent = `${formatNumber(part.bounds.width)} x ${formatNumber(part.bounds.height)} ${els.units.value}, ${part.entities.length} entities`;
     li.append(title, details);
     els.partsList.append(li);
   }
@@ -375,6 +487,45 @@ function positiveNumber(value, fallback) {
 
 function round(value) {
   return Math.round(value * 1000) / 1000;
+}
+
+function formatNumber(value) {
+  return String(Number(round(value).toFixed(3)));
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function rotatePoint(point, angle) {
+  const radians = (angle * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return {
+    x: point.x * cos - point.y * sin,
+    y: point.x * sin + point.y * cos,
+  };
+}
+
+function transformPoint(point, placement, sheetOffsetY, rotatedBounds) {
+  const rotated = rotatePoint(point, placement.angle || 0);
+  return {
+    x: rotated.x - rotatedBounds.minX + placement.x,
+    y: rotated.y - rotatedBounds.minY + placement.y + sheetOffsetY,
+  };
+}
+
+function normalizeAngle(angle) {
+  return ((angle % 360) + 360) % 360;
+}
+
+function firstUnitsCode(placements) {
+  const part = placements.find((placement) => placement.part.unitsCode !== undefined)?.part;
+  return part ? part.unitsCode : unitCodeFromUi();
+}
+
+function unitCodeFromUi() {
+  return els.units.value === "inch" ? 1 : 4;
 }
 
 function saveText(filename, text, type) {
