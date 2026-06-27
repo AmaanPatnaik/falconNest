@@ -7,7 +7,7 @@
 /dist
 /bin
 /minkowski
-/deepnest-*win*x64
+/falconnest-*win*x64
 git_token.rtf
 .idea
 *.zip
@@ -17,7 +17,7 @@ node_modules/
 /playwright-report/
 /blob-report/
 /playwright/.cache/
-/deepnest-v*
+/falconnest-v*
 /out
 /.env
 /.env.local
