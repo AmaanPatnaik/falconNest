@@ -3,80 +3,126 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>FalconNest DXF nesting</title>
+    <title>FalconNest 2D Nesting</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main class="app">
-      <section class="workspace" aria-label="Nesting workspace">
-        <header class="toolbar">
-          <div class="brand">
-            <span class="mark" aria-hidden="true"></span>
-            <div>
-              <h1>FalconNest</h1>
-              <p>Static DXF nesting for browser-based laser and CNC layouts.</p>
-            </div>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <h1>FalconNest</h1>
+            <p>CNC, laser, plasma, and waterjet nesting</p>
           </div>
-          <div class="actions">
-            <label class="file-button">
-              <input id="file-input" type="file" accept=".dxf" multiple />
-              Import DXF
-            </label>
-            <button id="nest-button" type="button">Nest</button>
-            <button id="save-dxf" type="button" disabled>Save DXF</button>
-            <button id="save-svg" type="button" disabled>Save SVG</button>
-          </div>
-        </header>
+        </div>
+        <nav class="toolbar" aria-label="Project actions">
+          <button id="new-project" type="button">New Project</button>
+          <label class="file-button">
+            <input id="file-input" type="file" accept=".dxf" multiple />
+            Import DXF
+          </label>
+          <button id="export-dxf" type="button" disabled>Export DXF</button>
+          <button id="nest-button" class="primary" type="button">Nest</button>
+          <button id="clear-sheet" type="button">Clear Sheet</button>
+          <button id="settings-toggle" class="settings-button" type="button" aria-expanded="false">Settings</button>
+        </nav>
+      </header>
 
-        <section class="controls" aria-label="Sheet controls">
+      <section class="progress-panel" aria-label="Nesting progress">
+        <label class="progress-label">
+          Nesting progress
+          <progress id="nest-progress" value="0" max="100"></progress>
+        </label>
+        <div class="iteration-history" aria-label="Nesting iterations">
+          <span>Iterations</span>
+          <div id="iteration-list"></div>
+        </div>
+      </section>
+
+      <aside id="settings-panel" class="settings-panel" aria-label="Settings" hidden>
+        <h2>Settings</h2>
+        <section>
+          <h3>Display Units</h3>
+          <label class="choice"><input type="radio" name="display-units" value="inch" checked /> Inches</label>
+          <label class="choice"><input type="radio" name="display-units" value="mm" /> Millimeters</label>
+        </section>
+        <section class="field-grid">
           <label>
             Sheet width
-            <input id="sheet-width" type="number" min="1" step="1" value="1200" />
+            <input id="sheet-width" type="number" min="0.001" step="0.001" value="48" />
           </label>
           <label>
             Sheet height
-            <input id="sheet-height" type="number" min="1" step="1" value="600" />
+            <input id="sheet-height" type="number" min="0.001" step="0.001" value="96" />
           </label>
           <label>
-            Spacing
-            <input id="spacing" type="number" min="0" step="0.1" value="3" />
+            Material name
+            <input id="material-name" type="text" placeholder="Optional" />
           </label>
           <label>
-            Rotation step
-            <input id="rotation-step" type="number" min="1" max="360" step="1" value="1" />
+            Space Between Parts
+            <input id="spacing" type="number" min="0" step="0.001" value="0.2" />
           </label>
           <label>
-            Units
-            <select id="units">
-              <option value="mm">mm</option>
-              <option value="inch">inch</option>
+            Curve Tolerance
+            <input id="curve-tolerance" type="number" min="0.001" step="0.001" value="0.01" />
+          </label>
+          <label>
+            Part Rotations
+            <input id="part-rotations" type="number" min="1" max="360" step="1" value="4" />
+          </label>
+          <label>
+            Optimization Type
+            <select id="optimization-type">
+              <option value="gravity">Gravity</option>
+              <option value="box">Bounding Box</option>
+              <option value="squeeze">Squeeze</option>
             </select>
           </label>
-          <label>
-            Copies per file
-            <input id="copies" type="number" min="1" step="1" value="1" />
-          </label>
         </section>
-
-        <section class="statusbar" aria-live="polite">
-          <span id="status">Import one or more DXF files to begin.</span>
-          <span id="summary"></span>
+        <section>
+          <h3>Canvas</h3>
+          <label class="choice"><input id="show-grid" type="checkbox" checked /> Optional grid</label>
+          <label class="choice"><input id="snap-grid" type="checkbox" /> Optional snap to grid</label>
+          <label class="choice"><input id="show-bounds" type="checkbox" checked /> Bounding boxes</label>
+          <button id="fit-view" type="button">Fit to screen</button>
         </section>
-
-        <section class="stage-wrap">
-          <svg id="stage" role="img" aria-label="Nesting preview"></svg>
+        <section>
+          <h3>Create Part</h3>
+          <div class="manual-row">
+            <select id="manual-type">
+              <option value="rectangle">Rectangle</option>
+              <option value="circle">Circle</option>
+              <option value="polygon">Regular Polygon</option>
+              <option value="slot">Slot</option>
+            </select>
+            <button id="add-manual" type="button">Add</button>
+          </div>
         </section>
-      </section>
+        <section id="warnings" class="warnings" aria-live="polite"></section>
+      </aside>
 
-      <aside class="sidebar" aria-label="Imported parts">
+      <aside class="parts-panel" aria-label="Part list">
         <div class="panel-head">
           <h2>Parts</h2>
-          <button id="clear-button" type="button">Clear</button>
         </div>
         <ol id="parts-list"></ol>
       </aside>
+
+      <section class="canvas-panel" aria-label="Interactive sheet viewer">
+        <svg id="canvas" tabindex="0" role="img" aria-label="Nesting canvas"></svg>
+      </section>
+
+      <footer class="statusbar">
+        <span id="utilization">Material utilization: 0%</span>
+        <span id="waste">Waste area: 0</span>
+        <span id="sheet-count">Sheets: 0</span>
+        <span id="part-count">Total parts: 0</span>
+        <span id="nest-time">Nesting time: 0 ms</span>
+      </footer>
     </main>
 
-    <script src="app.js"></script>
+    <script type="module" src="app.js"></script>
   </body>
 </html>

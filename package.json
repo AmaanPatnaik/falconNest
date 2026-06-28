@@ -3,9 +3,12 @@
   "version": "1.0.0",
   "description": "Static DXF nesting for Laser and CNC",
   "private": true,
+  "type": "module",
   "license": "MIT",
   "scripts": {
-    "test:static": "node --check docs/app.js"
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "test:static": "node scripts/check-static.mjs"
   },
   "keywords": [
     "DXF",
